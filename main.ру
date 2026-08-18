@@ -1,0 +1,105 @@
+import os
+import asyncio
+import sqlite3
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+
+# Токен берется из настроек Render
+API_TOKEN = os.getenv("BOT_TOKEN")
+
+HOURLY_RATE = 300   # Ставка руб/час
+NORM_HOURS = 160    # Норма часов в месяц
+OVERTIME_RATE = 1.5 # Коэффициент переработки
+
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+
+def init_db():
+    conn = sqlite3.connect('work_schedule.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS shifts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            date TEXT,
+            hours REAL,
+            is_day_off INTEGER
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "👋 **Бот учета смен и зарплаты**\n\n"
+        "Команды:\n"
+        "➕ `/add YYYY-MM-DD часы выходной(1/0)` — добавить смену\n"
+        "*(Пример: `/add 2026-08-18 12 0`)*\n\n"
+        "📊 `/stats YYYY-MM` — отчет за месяц\n"
+        "*(Пример: `/stats 2026-08`)*",
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("add"))
+async def add_shift(message: types.Message):
+    try:
+        _, date_str, hours, is_day_off = message.text.split()
+        conn = sqlite3.connect('work_schedule.db')
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO shifts (user_id, date, hours, is_day_off) VALUES (?, ?, ?, ?)",
+            (message.from_user.id, date_str, float(hours), int(is_day_off))
+        )
+        conn.commit()
+        conn.close()
+        await message.answer(f"✅ Запись добавлена: {date_str} — {hours} ч.")
+    except Exception:
+        await message.answer("❌ Ошибка! Формат: `/add 2026-08-18 12 0`", parse_mode="Markdown")
+
+@dp.message(Command("stats"))
+async def get_stats(message: types.Message):
+    try:
+        _, month_str = message.text.split()
+        conn = sqlite3.connect('work_schedule.db')
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT hours, is_day_off FROM shifts WHERE user_id = ? AND date LIKE ?",
+            (message.from_user.id, f"{month_str}%")
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            await message.answer("ℹ️ За указанный месяц нет данных.")
+            return
+
+        total_shifts = len(rows)
+        days_off_worked = sum(1 for r in rows if r[1] == 1)
+        total_hours = sum(r[0] for r in rows)
+        
+        overtime_hours = max(0.0, total_hours - NORM_HOURS)
+        base_hours = total_hours - overtime_hours
+        overtime_percent = (overtime_hours / NORM_HOURS) * 100 if NORM_HOURS > 0 else 0
+        
+        total_salary = (base_hours * HOURLY_RATE) + (overtime_hours * HOURLY_RATE * OVERTIME_RATE)
+
+        text = (
+            f"📊 **Отчет за {month_str}**\n\n"
+            f"🗓 **Смен:** {total_shifts}\n"
+            f"🏖 **Выходных отраб.:** {days_off_worked}\n"
+            f"⏱ **Часов:** {total_hours:.1f} / {NORM_HOURS} ч.\n"
+            f"🔥 **Переработка:** {overtime_hours:.1f} ч. ({overtime_percent:.1f}%)\n"
+            f"-----------------------------------\n"
+            f"💰 **Зарплата:** {total_salary:,.2f} руб."
+        )
+        await message.answer(text, parse_mode="Markdown")
+    except Exception:
+        await message.answer("❌ Ошибка! Формат: `/stats 2026-08`", parse_mode="Markdown")
+
+async def main():
+    init_db()
+    await dp.start_polling(bot)
+
+if __name__ == '__main__':
+    asyncio.run(main())
